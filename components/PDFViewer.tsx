@@ -264,7 +264,7 @@ export default function PDFViewer({ file, fields, onFieldPositionUpdate }: PDFVi
                           fontWeight: field.styles?.fontWeight || 'normal',
                           fontStyle: field.styles?.fontStyle || 'normal',
                           textDecoration: field.styles?.textDecoration || 'none',
-                          textAlign: field.styles?.textAlign || 'left',
+                          textAlign: field.styles?.textAlign as "left" | "center" | "right" | "justify" | undefined || "left",
                           color: field.styles?.color || '#000000'
                         }}
                       >
