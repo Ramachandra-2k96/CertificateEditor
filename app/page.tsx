@@ -4,10 +4,14 @@ import { useState } from "react";
 import { Upload } from "lucide-react";
 import dynamic from "next/dynamic";
 import * as XLSX from "xlsx";
+import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import JSZip from "jszip";
+import { saveAs } from "file-saver";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
+import { toast } from "sonner";
 import TextStyler, { TextStyles } from "@/components/TextStyler";
 
 const PDFViewer = dynamic(() => import("@/components/PDFViewer"), {
@@ -17,11 +21,20 @@ const PDFViewer = dynamic(() => import("@/components/PDFViewer"), {
 export default function CertificateEditor() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [excelFile, setExcelFile] = useState<File | null>(null);
-  const [fields, setFields] = useState<Array<{ id: string; name: string; x: number; y: number; styles?: TextStyles }>>([]);
+  const [fields, setFields] = useState<Array<{
+    id: string;
+    name: string;
+    x: number;
+    y: number;
+    styles?: TextStyles;
+    pdfOffsetX?: number;
+    pdfOffsetY?: number;
+  }>>([]);
   const [excelData, setExcelData] = useState<any[]>([]);
   const [availableFields, setAvailableFields] = useState<string[]>([]);
   const [selectedFields, setSelectedFields] = useState<string[]>([]);
   const [selectedField, setSelectedField] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const handlePDFUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files?.[0]) {
@@ -50,6 +63,7 @@ export default function CertificateEditor() {
           setFields([]);
         } catch (error) {
           console.error('Error processing Excel file:', error);
+          toast.error('Error processing Excel file. Please check the format and try again.');
         }
       };
       reader.readAsBinaryString(file);
@@ -85,11 +99,127 @@ export default function CertificateEditor() {
   };
 
   const handleProcessCertificates = async () => {
-    if (!pdfFile || !excelData.length || !fields.length) return;
-
-    // Process logic will be implemented here
-    console.log('Processing certificates with fields:', fields);
-    console.log('Excel data:', excelData);
+    if (!pdfFile || !excelData.length || !fields.length) {
+      toast.error("Please upload a PDF template and Excel data, and add fields");
+      return;
+    }
+  
+    try {
+      setIsProcessing(true);
+      // Show loading toast
+      toast.loading("Processing certificates...");
+      
+      // Read the PDF template
+      const pdfBytes = await pdfFile.arrayBuffer();
+      
+      // Create a ZIP file
+      const zip = new JSZip();
+      
+      // Process each row in the Excel data
+      for (let i = 0; i < excelData.length; i++) {
+        const rowData = excelData[i];
+        
+        // Clone the PDF for each row
+        const pdfDoc = await PDFDocument.load(pdfBytes);
+        const pages = pdfDoc.getPages();
+        const firstPage = pages[0];
+        const { width, height } = firstPage.getSize();
+        
+        // Add each field to the PDF
+        for (const field of fields) {
+          // Get the value from Excel data
+          const value = rowData[field.name] !== undefined ? String(rowData[field.name]) : "";
+          
+          // Skip if no value
+          if (!value) continue;
+          
+          // Calculate the adjusted position
+          // This is based on the field's position in the PDF viewer
+          const fontSize = field.styles?.fontSize || 16;
+          
+          // Get base field positions
+          const baseX = field.x;
+          const baseY = field.y;
+          
+          // Apply any manual offsets defined in the UI
+          const pdfOffsetX = field.pdfOffsetX || 0;
+          const pdfOffsetY = field.pdfOffsetY || 0;
+          
+          // Final position calculation - critical fix here!
+          // PDF coordinates: origin at bottom-left, Y-axis goes up
+          // UI coordinates: origin at top-left, Y-axis goes down
+          const adjustedX = baseX + pdfOffsetX;
+          
+          // The key fix: properly invert the Y coordinate based on PDF height
+          const adjustedY = height - baseY + pdfOffsetY -60;
+          
+          // Set text styling
+          let font;
+          if (field.styles?.fontFamily === "Times New Roman") {
+            font = await pdfDoc.embedFont(StandardFonts.TimesRoman);
+          } else if (field.styles?.fontFamily === "Courier New") {
+            font = await pdfDoc.embedFont(StandardFonts.Courier);
+          } else {
+            // Default to Helvetica for other fonts since PDF standard fonts are limited
+            font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+          }
+          
+          // Parse color from hex to RGB
+          let color = { r: 0, g: 0, b: 0 }; // Default black
+          if (field.styles?.color) {
+            const hex = field.styles.color.replace('#', '');
+            color = {
+              r: parseInt(hex.substring(0, 2), 16) / 255,
+              g: parseInt(hex.substring(2, 4), 16) / 255,
+              b: parseInt(hex.substring(4, 6), 16) / 255
+            };
+          }
+          
+          // Add text to PDF with proper alignment
+          const textAlignment = field.styles?.textAlign || 'left';
+          let textOptions = {
+            x: adjustedX,
+            y: adjustedY,
+            size: fontSize,
+            font,
+            color: rgb(color.r, color.g, color.b)
+          };
+          
+          // Handle text alignment
+          if (textAlignment === 'center') {
+            const textWidth = font.widthOfTextAtSize(value, fontSize);
+            textOptions.x = adjustedX - (textWidth / 2);
+          } else if (textAlignment === 'right') {
+            const textWidth = font.widthOfTextAtSize(value, fontSize);
+            textOptions.x = adjustedX - textWidth;
+          }
+          
+          // Add text to PDF
+          firstPage.drawText(value, textOptions);
+        }
+        
+        // Save the modified PDF
+        const modifiedPdfBytes = await pdfDoc.save();
+        
+        // Add to ZIP file
+        const fileName = `certificate_${i + 1}.pdf`;
+        zip.file(fileName, modifiedPdfBytes);
+      }
+      
+      // Generate the ZIP file
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      
+      // Create a download link
+      saveAs(zipBlob, "certificates.zip");
+      
+      // Show success toast
+      toast.success(`Generated ${excelData.length} certificates successfully!`);
+    } catch (error) {
+      console.error("Error processing certificates:", error);
+      toast.error("Error processing certificates. Please try again.");
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   return (
@@ -99,9 +229,9 @@ export default function CertificateEditor() {
           <h1 className="text-2xl font-bold">Certificate Editor</h1>
           <Button 
             onClick={handleProcessCertificates}
-            disabled={!pdfFile || !excelData.length || !fields.length}
+            disabled={!pdfFile || !excelData.length || !fields.length || isProcessing}
           >
-            Process Certificates
+            {isProcessing ? "Processing..." : "Process Certificates"}
           </Button>
         </div>
       </header>
@@ -135,6 +265,11 @@ export default function CertificateEditor() {
                         className="hidden"
                         onChange={handlePDFUpload}
                       />
+                      {pdfFile && (
+                        <p className="mt-2 text-sm text-muted-foreground">
+                          Uploaded: {pdfFile.name}
+                        </p>
+                      )}
                     </div>
                     <div>
                       <label className="block text-sm font-medium mb-2">Data Source</label>
@@ -153,6 +288,11 @@ export default function CertificateEditor() {
                         className="hidden"
                         onChange={handleExcelUpload}
                       />
+                      {excelFile && (
+                        <p className="mt-2 text-sm text-muted-foreground">
+                          Uploaded: {excelFile.name} ({excelData.length} rows)
+                        </p>
+                      )}
                     </div>
                   </div>
                 </Card>
@@ -226,10 +366,46 @@ export default function CertificateEditor() {
                         </div>
                         
                         {selectedField && (
-                          <TextStyler 
-                            initialStyles={fields.find(f => f.id === selectedField)?.styles}
-                            onStyleChange={(styles) => handleFieldStyleUpdate(selectedField, styles)}
-                          />
+                          <>
+                            <TextStyler 
+                              initialStyles={fields.find(f => f.id === selectedField)?.styles}
+                              onStyleChange={(styles) => handleFieldStyleUpdate(selectedField, styles)}
+                            />
+                            
+                            <div className="mt-4">
+                              <h4 className="text-sm font-medium mb-2">Fine-tune PDF Position</h4>
+                              <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                  <label className="text-xs">X Offset</label>
+                                  <input 
+                                    type="number" 
+                                    className="w-full p-2 border rounded-md"
+                                    value={fields.find(f => f.id === selectedField)?.pdfOffsetX || 0}
+                                    onChange={(e) => {
+                                      const offset = parseInt(e.target.value) || 0;
+                                      setFields(fields.map(field => 
+                                        field.id === selectedField ? { ...field, pdfOffsetX: offset } : field
+                                      ));
+                                    }}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-xs">Y Offset</label>
+                                  <input 
+                                    type="number" 
+                                    className="w-full p-2 border rounded-md"
+                                    value={fields.find(f => f.id === selectedField)?.pdfOffsetY || 0}
+                                    onChange={(e) => {
+                                      const offset = parseInt(e.target.value) || 0;
+                                      setFields(fields.map(field => 
+                                        field.id === selectedField ? { ...field, pdfOffsetY: offset } : field
+                                      ));
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </>
                         )}
                       </>
                     ) : (
@@ -250,7 +426,6 @@ export default function CertificateEditor() {
                   file={pdfFile} 
                   fields={fields}
                   onFieldPositionUpdate={handleFieldPositionUpdate}
-                  onFieldStyleUpdate={handleFieldStyleUpdate}
                 />
               ) : (
                 <div className="flex items-center justify-center h-full">
