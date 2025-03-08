@@ -151,7 +151,7 @@ export default function CertificateEditor() {
           const adjustedX = baseX + pdfOffsetX;
           
           // The key fix: properly invert the Y coordinate based on PDF height
-          const adjustedY = height - baseY + pdfOffsetY -60;
+          const adjustedY = height - baseY + pdfOffsetY -50;
           
           // Set text styling
           let font;
